@@ -24,6 +24,8 @@ const SH = {
 const PESO = '₱';
 const fmt = n => PESO + (Number(n) || 0).toLocaleString('en-PH', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 const num = n => (Number(n) || 0).toLocaleString('en-PH', { maximumFractionDigits: 2 });
+const sortByName = arr => [...arr].sort((a, b) => (a.name || '').localeCompare(b.name || '', undefined, { sensitivity: 'base' }));
+const plural = (n, w) => `${n} ${w}${n === 1 ? '' : 's'}`;
 
 const UNITS = ['kg', 'g', 'L', 'ml', 'pcs', 'pack', 'cup', 'tbsp', 'tsp', 'oz', 'lb'];
 
@@ -262,6 +264,7 @@ export default function App() {
   const [screen, setScreen] = useState('ingredients');
   const [sheet, setSheet] = useState(null); // { type, payload }
   const [plan, setPlan] = useState(() => { try { return JSON.parse(localStorage.getItem(PLAN_KEY) || '[]'); } catch { return []; } });
+  const demo = !getSettings().apiUrl;
 
   useEffect(() => {
     const s = getSettings();
@@ -274,7 +277,9 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem(PLAN_KEY, JSON.stringify(plan)); }, [plan]);
 
-  const reconcile = () => setTimeout(() => syncData(setData), 1500);
+  // POST is fire-and-forget (opaque). Reconcile twice: once quickly, once later, so a
+  // slow Apps Script write that hasn't committed by the first refetch is still caught.
+  const reconcile = () => { setTimeout(() => syncData(setData), 1800); setTimeout(() => syncData(setData), 4500); };
 
   /* ----- ingredient mutations ----- */
   const saveIngredient = form => {
@@ -324,10 +329,13 @@ export default function App() {
       recipes: isEdit ? d.recipes.map(r => (r.recipeId === recipeId ? rec : r)) : [...d.recipes, rec],
       recipeItems: [...d.recipeItems.filter(it => it.recipeId !== recipeId), ...items],
     }));
-    api.post(isEdit
-      ? { type: 'update_recipe', rowId: form.rowId, ...rec }
-      : { type: 'append_recipe', ...rec });
-    api.post({ type: 'set_recipe_items', recipeId, items: items.map(it => ({ ingredientId: it.ingredientId, qty: it.qty })) });
+    // Single atomic write: the recipe row AND its line items in one request/execution.
+    api.post({
+      type: 'save_recipe',
+      rowId: form.rowId,
+      recipe: rec,
+      items: items.map(it => ({ ingredientId: it.ingredientId, qty: it.qty })),
+    });
     reconcile();
     setSheet(null);
   };
@@ -394,7 +402,10 @@ export default function App() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <div>
             <div style={{ fontSize: 19, fontWeight: 800, letterSpacing: '-.02em' }}>Recipe &amp; Costing</div>
-            <div style={{ fontSize: 12, color: '#b9b9cc', marginTop: 2 }}>{NAV.find(n => n.id === screen)?.label}</div>
+            <div style={{ fontSize: 12, color: '#b9b9cc', marginTop: 2, display: 'flex', alignItems: 'center', gap: 8 }}>
+              {NAV.find(n => n.id === screen)?.label}
+              {demo && <span style={{ fontSize: 10, fontWeight: 700, color: '#ffd479', background: 'rgba(224,144,10,.22)', padding: '2px 7px', borderRadius: 6, letterSpacing: '.04em' }}>DEMO</span>}
+            </div>
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <button className="pressable" onClick={exportData} title="Backup"
@@ -520,18 +531,19 @@ function RecipesScreen({ data, setSheet }) {
    Screen: Costing dashboard
 ============================================================================ */
 function CostingScreen({ data }) {
-  const [recipeId, setRecipeId] = useState(data.recipes[0]?.recipeId || '');
+  const recipes = sortByName(data.recipes);
+  const [recipeId, setRecipeId] = useState(recipes[0]?.recipeId || '');
   const [batches, setBatches] = useState(1);
-  const recipe = data.recipes.find(r => r.recipeId === recipeId);
   if (!data.recipes.length) return <Empty icon="chart" title="Nothing to analyze" hint="Create a recipe first to see its costing." />;
+  const recipe = recipes.find(r => r.recipeId === recipeId) || recipes[0];
   const c = recipe ? computeRecipe(recipe, data.recipeItems, data.ingredients) : null;
 
   return (
     <>
       <div style={cardStyle}>
         <label style={labelStyle}>Recipe to analyze</label>
-        <select style={inp} value={recipeId} onChange={e => setRecipeId(e.target.value)}>
-          {data.recipes.map(r => <option key={r.recipeId} value={r.recipeId}>{r.name}</option>)}
+        <select style={inp} value={recipe?.recipeId || ''} onChange={e => setRecipeId(e.target.value)}>
+          {recipes.map(r => <option key={r.recipeId} value={r.recipeId}>{r.name}</option>)}
         </select>
       </div>
 
@@ -591,7 +603,8 @@ function CostingScreen({ data }) {
    Screen: Grocery / production planner
 ============================================================================ */
 function PlannerScreen({ data, plan, setPlan, setScreen }) {
-  const [pick, setPick] = useState(data.recipes[0]?.recipeId || '');
+  const recipes = sortByName(data.recipes);
+  const [pick, setPick] = useState(recipes[0]?.recipeId || '');
   const [batches, setBatches] = useState(1);
 
   const add = () => {
@@ -629,7 +642,7 @@ function PlannerScreen({ data, plan, setPlan, setScreen }) {
         <SubTitle>Add to production plan</SubTitle>
         <Field label="Recipe">
           <select style={inp} value={pick} onChange={e => setPick(e.target.value)}>
-            {data.recipes.map(r => <option key={r.recipeId} value={r.recipeId}>{r.name}</option>)}
+            {recipes.map(r => <option key={r.recipeId} value={r.recipeId}>{r.name}</option>)}
           </select>
         </Field>
         <Field label="Target batches">
@@ -703,7 +716,7 @@ function SettingsScreen({ data, setData }) {
       if (r?.ok) { setStatus('ok'); syncData(setData); } else setStatus('fail');
     } catch { setStatus('fail'); }
   };
-  const counts = `${data.ingredients.length} ingredients, ${data.recipes.length} recipes`;
+  const counts = `${plural(data.ingredients.length, 'ingredient')}, ${plural(data.recipes.length, 'recipe')}`;
   const pushAll = () => {
     if (!getSettings().apiUrl) return alert('Save and test a backend connection above first.');
     if (!confirm(`This REPLACES everything in the connected Google Sheet with the data currently loaded in the app (${counts}). Continue?`)) return;
@@ -816,7 +829,8 @@ function RecipeSheet({ init, data, onClose, onSave, onDelete }) {
     overheadPack: init?.overheadPack ?? '', overheadUtil: init?.overheadUtil ?? '',
   });
   const [items, setItems] = useState(initItems);
-  const [pick, setPick] = useState(data.ingredients[0]?.ingredientId || '');
+  const ingredientsSorted = sortByName(data.ingredients);
+  const [pick, setPick] = useState(ingredientsSorted[0]?.ingredientId || '');
   const [qty, setQty] = useState('');
   const set = (k, v) => setF(p => ({ ...p, [k]: v }));
   const byId = Object.fromEntries(data.ingredients.map(i => [i.ingredientId, i]));
@@ -871,7 +885,7 @@ function RecipeSheet({ init, data, onClose, onSave, onDelete }) {
         <div style={{ flex: 2 }}>
           <label style={labelStyle}>Ingredient</label>
           <select style={inp} value={pick} onChange={e => setPick(e.target.value)}>
-            {data.ingredients.map(i => <option key={i.ingredientId} value={i.ingredientId}>{i.name}</option>)}
+            {ingredientsSorted.map(i => <option key={i.ingredientId} value={i.ingredientId}>{i.name}</option>)}
           </select>
         </div>
         <div style={{ flex: 1 }}>
