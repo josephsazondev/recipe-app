@@ -415,7 +415,7 @@ export default function App() {
         {screen === 'recipes' && <RecipesScreen data={data} setSheet={setSheet} />}
         {screen === 'costing' && <CostingScreen data={data} />}
         {screen === 'planner' && <PlannerScreen data={data} plan={plan} setPlan={setPlan} setScreen={setScreen} />}
-        {screen === 'settings' && <SettingsScreen setData={setData} />}
+        {screen === 'settings' && <SettingsScreen data={data} setData={setData} />}
       </main>
 
       {/* FAB — anchored to the bottom-right of the centered container */}
@@ -494,15 +494,21 @@ function RecipesScreen({ data, setSheet }) {
         const c = computeRecipe(r, data.recipeItems, data.ingredients);
         return (
           <button key={r.recipeId} className="pressable" onClick={() => setSheet({ type: 'recipe', payload: r })}
-            style={{ ...cardStyle, textAlign: 'left', display: 'flex', alignItems: 'center', gap: 12 }}>
-            <div style={{ flex: 1, minWidth: 0 }}>
-              <div style={{ fontWeight: 700, fontSize: 15 }}>{r.name}</div>
-              <div style={{ fontSize: 12.5, color: C.sub, marginTop: 3 }}>
-                {num(c.totalPacks)} packs &middot; {r.servings} servings &middot; {c.lines.length} ingredients
+            style={{ ...cardStyle, textAlign: 'left', display: 'block' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontWeight: 700, fontSize: 15 }}>{r.name}</div>
+                <div style={{ fontSize: 12.5, color: C.sub, marginTop: 3 }}>
+                  {num(c.totalPacks)} packs &middot; {r.servings} servings &middot; {c.lines.length} ingredients
+                </div>
               </div>
+              <Icon name="chevron" size={18} color={C.hint} />
             </div>
-            <Pill value={c.profit} suffix="/pack" />
-            <Icon name="chevron" size={18} color={C.hint} />
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <Mini label="Target / pack" value={fmt(c.sellPrice)} />
+              <Mini label="Total cost" value={fmt(c.totalCost)} />
+              <Mini label="Profit / pack" value={fmt(c.profit)} tone={c.profit >= 0 ? 'profit' : 'loss'} />
+            </div>
           </button>
         );
       })}
@@ -681,11 +687,12 @@ function PlannerScreen({ data, plan, setPlan, setScreen }) {
 /* ============================================================================
    Screen: Settings (backend connection)
 ============================================================================ */
-function SettingsScreen({ setData }) {
+function SettingsScreen({ data, setData }) {
   const s = getSettings();
   const [apiUrl, setApiUrl] = useState(s.apiUrl || '');
   const [apiKey, setApiKey] = useState(s.apiKey || '');
   const [status, setStatus] = useState(null);
+  const [upload, setUpload] = useState(null); // null | 'uploading' | 'done'
 
   const save = () => { saveSettings({ apiUrl: apiUrl.trim(), apiKey: apiKey.trim() }); setStatus(null); };
   const test = async () => {
@@ -695,6 +702,15 @@ function SettingsScreen({ setData }) {
       const r = await api.get('ping');
       if (r?.ok) { setStatus('ok'); syncData(setData); } else setStatus('fail');
     } catch { setStatus('fail'); }
+  };
+  const counts = `${data.ingredients.length} ingredients, ${data.recipes.length} recipes`;
+  const pushAll = () => {
+    if (!getSettings().apiUrl) return alert('Save and test a backend connection above first.');
+    if (!confirm(`This REPLACES everything in the connected Google Sheet with the data currently loaded in the app (${counts}). Continue?`)) return;
+    setUpload('uploading');
+    api.post({ type: 'import_all', ingredients: data.ingredients, recipes: data.recipes, recipeItems: data.recipeItems });
+    // POST is fire-and-forget — wait, then refetch so the saved rows (with real rowIds) come back.
+    setTimeout(() => { syncData(setData); setUpload('done'); }, 2500);
   };
 
   return (
@@ -718,6 +734,19 @@ function SettingsScreen({ setData }) {
         {status === 'testing' && <Note tone="muted">Testing…</Note>}
         {status === 'ok' && <Note tone="profit">Connected. Data synced.</Note>}
         {status === 'fail' && <Note tone="loss">Could not reach the backend. Check the URL, deployment access, and key.</Note>}
+      </div>
+
+      <div style={cardStyle}>
+        <SubTitle>Upload current data to Sheets</SubTitle>
+        <p style={{ fontSize: 13, color: C.sub, marginBottom: 14, lineHeight: 1.5 }}>
+          Pushes the data currently loaded in the app (<b>{counts}</b>) to the connected Google Sheet,
+          <b> replacing</b> what's there. Use this after Restoring a backup to persist it to the backend.
+        </p>
+        <button className="pressable" style={{ ...btnPrimary, opacity: upload === 'uploading' ? 0.6 : 1 }}
+          disabled={upload === 'uploading'} onClick={pushAll}>
+          <Icon name="upload" size={18} />{upload === 'uploading' ? 'Uploading…' : 'Upload to Google Sheets'}
+        </button>
+        {upload === 'done' && <Note tone="profit">Upload sent and re-synced from the sheet.</Note>}
       </div>
 
       <div style={cardStyle}>
@@ -895,12 +924,13 @@ function Stat({ label, value, tone }) {
     </div>
   );
 }
-function Pill({ value, suffix }) {
-  const ok = value >= 0;
+function Mini({ label, value, tone }) {
+  const color = tone === 'profit' ? C.profit : tone === 'loss' ? C.loss : C.ink;
   return (
-    <span style={{ fontSize: 12.5, fontWeight: 700, color: ok ? C.profit : C.loss, background: ok ? C.profitBg : C.lossBg, padding: '5px 9px', borderRadius: 9, whiteSpace: 'nowrap' }}>
-      {fmt(value)}{suffix}
-    </span>
+    <div style={{ flex: 1, minWidth: 0, background: C.bg, borderRadius: 10, padding: '8px 10px' }}>
+      <div style={{ fontSize: 10, color: C.sub, textTransform: 'uppercase', letterSpacing: '.04em', whiteSpace: 'nowrap' }}>{label}</div>
+      <div style={{ fontSize: 14, fontWeight: 700, color, marginTop: 2 }}>{value}</div>
+    </div>
   );
 }
 function Note({ tone, children }) {
