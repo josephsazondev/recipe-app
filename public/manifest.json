@@ -1,0 +1,14 @@
+{
+  "name": "Recipe & Costing",
+  "short_name": "Costing",
+  "description": "Recipe formulation, cost analysis, and grocery planning for small food businesses.",
+  "start_url": ".",
+  "scope": ".",
+  "display": "standalone",
+  "background_color": "#f7f7fb",
+  "theme_color": "#1a1a2e",
+  "orientation": "portrait",
+  "icons": [
+    { "src": "favicon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any maskable" }
+  ]
+}

@@ -1,0 +1,22 @@
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Local backend & docs (keep out of the deployed repo)
+Code.gs
+apps-script/
+SETUP.md
+TECH_TEMPLATE.md
+Recipe App.html
+
+.env
+.env.*
+!.env.example
+.claude/
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+*.log
