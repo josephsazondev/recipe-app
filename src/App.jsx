@@ -264,6 +264,7 @@ export default function App() {
   const [screen, setScreen] = useState('ingredients');
   const [sheet, setSheet] = useState(null); // { type, payload }
   const [plan, setPlan] = useState(() => { try { return JSON.parse(localStorage.getItem(PLAN_KEY) || '[]'); } catch { return []; } });
+  const [sync, setSync] = useState({ state: 'idle' }); // 'idle' | 'saving' | 'saved' | 'error'
   const demo = !getSettings().apiUrl;
 
   useEffect(() => {
@@ -277,9 +278,48 @@ export default function App() {
 
   useEffect(() => { localStorage.setItem(PLAN_KEY, JSON.stringify(plan)); }, [plan]);
 
-  // POST is fire-and-forget (opaque). Reconcile twice: once quickly, once later, so a
-  // slow Apps Script write that hasn't committed by the first refetch is still caught.
-  const reconcile = () => { setTimeout(() => syncData(setData), 1800); setTimeout(() => syncData(setData), 4500); };
+  /* Mutate optimistically, POST, then VERIFY the write actually landed.
+     POST is opaque (no-cors) so we can't read its result — instead we refetch and
+     check `verify(serverData)`. On success we adopt server state; if the write never
+     shows up (e.g. backend not redeployed, or unreachable) we KEEP the optimistic
+     data and surface an error instead of silently discarding it. */
+  const commit = (updater, body, verify) => {
+    setData(updater);
+    api.post(body);
+    if (!getSettings().apiUrl) return; // demo mode: nothing to sync against
+    setSync({ state: 'saving' });
+    const delays = [1800, 4000, 7000];
+    let idx = 0;
+    let reachable = true;
+    const attempt = () => {
+      api.get('all')
+        .then(r => {
+          if (!r || r.error) { reachable = !!r; return schedule(); }
+          reachable = true;
+          const norm = normalizeData(r);
+          if (verify(norm)) { setData(norm); flashSaved(); } else schedule();
+        })
+        .catch(() => { reachable = false; schedule(); });
+    };
+    const schedule = () => {
+      if (idx < delays.length) {
+        const prev = idx >= 1 ? delays[idx - 1] : 0;
+        setTimeout(attempt, delays[idx++] - prev);
+      } else {
+        setSync({
+          state: 'error',
+          msg: reachable
+            ? "Save didn’t sync. Redeploy the Apps Script as a NEW version, then retry."
+            : 'Backend unreachable — changes are kept on this device but not saved.',
+        });
+      }
+    };
+    schedule();
+  };
+  const flashSaved = () => {
+    setSync({ state: 'saved' });
+    setTimeout(() => setSync(s => (s.state === 'saved' ? { state: 'idle' } : s)), 2200);
+  };
 
   /* ----- ingredient mutations ----- */
   const saveIngredient = form => {
@@ -290,22 +330,19 @@ export default function App() {
       price: N(form.price), qty: N(form.qty) || 1,
       cal: N(form.cal), fat: N(form.fat), carbs: N(form.carbs), protein: N(form.protein),
     };
-    setData(d => ({
-      ...d,
-      ingredients: isEdit
-        ? d.ingredients.map(i => (i.ingredientId === ingredientId ? rec : i))
-        : [...d.ingredients, rec],
-    }));
-    api.post(isEdit
-      ? { type: 'update_ingredient', rowId: form.rowId, ...rec }
-      : { type: 'append_ingredient', ...rec });
-    reconcile();
+    commit(
+      d => ({ ...d, ingredients: isEdit ? d.ingredients.map(i => (i.ingredientId === ingredientId ? rec : i)) : [...d.ingredients, rec] }),
+      isEdit ? { type: 'update_ingredient', rowId: form.rowId, ...rec } : { type: 'append_ingredient', ...rec },
+      d => d.ingredients.some(i => i.ingredientId === ingredientId && (i.name || '') === rec.name)
+    );
     setSheet(null);
   };
   const deleteIngredient = ing => {
-    setData(d => ({ ...d, ingredients: d.ingredients.filter(i => i.ingredientId !== ing.ingredientId) }));
-    api.post({ type: 'delete_ingredient', rowId: ing.rowId || ing.ingredientId });
-    reconcile();
+    commit(
+      d => ({ ...d, ingredients: d.ingredients.filter(i => i.ingredientId !== ing.ingredientId) }),
+      { type: 'delete_ingredient', rowId: ing.rowId || ing.ingredientId },
+      d => !d.ingredients.some(i => i.ingredientId === ing.ingredientId)
+    );
     setSheet(null);
   };
 
@@ -324,30 +361,29 @@ export default function App() {
       rowId: undefined, itemId: 'ITM-' + Date.now() + '-' + i,
       recipeId, ingredientId: it.ingredientId, qty: N(it.qty),
     }));
-    setData(d => ({
-      ...d,
-      recipes: isEdit ? d.recipes.map(r => (r.recipeId === recipeId ? rec : r)) : [...d.recipes, rec],
-      recipeItems: [...d.recipeItems.filter(it => it.recipeId !== recipeId), ...items],
-    }));
-    // Single atomic write: the recipe row AND its line items in one request/execution.
-    api.post({
-      type: 'save_recipe',
-      rowId: form.rowId,
-      recipe: rec,
-      items: items.map(it => ({ ingredientId: it.ingredientId, qty: it.qty })),
-    });
-    reconcile();
+    commit(
+      d => ({
+        ...d,
+        recipes: isEdit ? d.recipes.map(r => (r.recipeId === recipeId ? rec : r)) : [...d.recipes, rec],
+        recipeItems: [...d.recipeItems.filter(it => it.recipeId !== recipeId), ...items],
+      }),
+      // Single atomic write: the recipe row AND its line items in one request/execution.
+      { type: 'save_recipe', rowId: form.rowId, recipe: rec, items: items.map(it => ({ ingredientId: it.ingredientId, qty: it.qty })) },
+      d => d.recipes.some(r => r.recipeId === recipeId && (r.name || '') === rec.name)
+    );
     setSheet(null);
   };
   const deleteRecipe = recipe => {
-    setData(d => ({
-      ...d,
-      recipes: d.recipes.filter(r => r.recipeId !== recipe.recipeId),
-      recipeItems: d.recipeItems.filter(it => it.recipeId !== recipe.recipeId),
-    }));
     setPlan(p => p.filter(x => x.recipeId !== recipe.recipeId));
-    api.post({ type: 'delete_recipe', rowId: recipe.rowId || recipe.recipeId, recipeId: recipe.recipeId });
-    reconcile();
+    commit(
+      d => ({
+        ...d,
+        recipes: d.recipes.filter(r => r.recipeId !== recipe.recipeId),
+        recipeItems: d.recipeItems.filter(it => it.recipeId !== recipe.recipeId),
+      }),
+      { type: 'delete_recipe', rowId: recipe.rowId || recipe.recipeId, recipeId: recipe.recipeId },
+      d => !d.recipes.some(r => r.recipeId === recipe.recipeId)
+    );
     setSheet(null);
   };
 
@@ -419,6 +455,25 @@ export default function App() {
           </div>
         </div>
       </header>
+
+      {/* sync status toast — makes opaque-POST results visible */}
+      {sync.state !== 'idle' && (
+        <div className="screen" style={{ position: 'fixed', top: 'calc(72px + env(safe-area-inset-top))', left: '50%', transform: 'translateX(-50%)', zIndex: 60, width: 'calc(100% - 32px)', maxWidth: 520 }}>
+          <div style={{
+            display: 'flex', alignItems: 'center', gap: 10, padding: '11px 14px', borderRadius: 12, boxShadow: SH.card, fontSize: 13, fontWeight: 600,
+            background: sync.state === 'error' ? C.lossBg : sync.state === 'saved' ? C.profitBg : C.surface,
+            color: sync.state === 'error' ? C.loss : sync.state === 'saved' ? C.profit : C.sub,
+          }}>
+            {sync.state === 'saving' && <span style={{ width: 15, height: 15, border: `2px solid ${C.border}`, borderTopColor: C.accent, borderRadius: '50%', animation: 'spin .7s linear infinite', flexShrink: 0 }} />}
+            {sync.state === 'saved' && <Icon name="check" size={16} color={C.profit} />}
+            {sync.state === 'error' && <Icon name="x" size={16} color={C.loss} />}
+            <span style={{ flex: 1, lineHeight: 1.35 }}>
+              {sync.state === 'saving' ? 'Saving to Google Sheets…' : sync.state === 'saved' ? 'Saved' : sync.msg}
+            </span>
+            {sync.state === 'error' && <button className="pressable" onClick={() => setSync({ state: 'idle' })} style={{ color: C.loss, padding: 4, flexShrink: 0 }}><Icon name="x" size={14} /></button>}
+          </div>
+        </div>
+      )}
 
       {/* screens */}
       <main className="screen" key={screen} style={{ flex: 1, padding: 16, paddingBottom: 96, display: 'flex', flexDirection: 'column', gap: 14 }}>
